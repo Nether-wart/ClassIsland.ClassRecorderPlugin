@@ -1,0 +1,30 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="ClassIsland.ClassRecorderPlugin.Views.RecordingPromptWindow"
+        Width="380"
+        SizeToContent="Height"
+        CanResize="False"
+        ShowInTaskbar="False"
+        ShowActivated="False"
+        SystemDecorations="None"
+        Topmost="True"
+        TransparencyLevelHint="Transparent"
+        Background="Transparent">
+    <Border Margin="8"
+            Padding="18"
+            Background="#F2202020"
+            BorderBrush="#40FFFFFF"
+            BorderThickness="1"
+            CornerRadius="12">
+        <StackPanel Spacing="6">
+            <TextBlock Foreground="#B0FFFFFF"
+                       FontSize="12"
+                       Text="上课录制" />
+            <TextBlock x:Name="MessageText"
+                       Foreground="White"
+                       FontSize="18"
+                       FontWeight="SemiBold"
+                       TextWrapping="Wrap" />
+        </StackPanel>
+    </Border>
+</Window>

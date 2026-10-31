@@ -1,0 +1,10 @@
+id: classisland.classrecorder
+name: 上课录制
+description: 在指定课程期间使用麦克风录制课堂音频，支持提前/延后录制、滚动存储与意外恢复。
+entranceAssembly: "ClassIsland.ClassRecorderPlugin.dll"
+url: https://github.com/ClassIsland/ClassIsland
+apiVersion: 2.0.0.0
+version: 1.0.0.0
+author: ClassIsland
+icon: icon.png
+readme: README.md
