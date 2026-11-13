@@ -3,18 +3,6 @@ using CommunityToolkit.Mvvm.ComponentModel;
 namespace ClassIsland.ClassRecorderPlugin.Models;
 
 /// <summary>
-/// 录音编码格式。
-/// </summary>
-public enum RecorderCodec
-{
-    /// <summary>AAC，封装为 MPEG-4（.m4a）。</summary>
-    Aac = 0,
-
-    /// <summary>Opus，封装为 Ogg（.opus）。</summary>
-    Opus = 1
-}
-
-/// <summary>
 /// 录音质量挡位。
 /// </summary>
 public enum RecorderQuality
@@ -37,6 +25,24 @@ public partial class RecorderSettings : ObservableObject
 
     /// <summary>录音固定声道数（课堂录音使用单声道）。</summary>
     public const int Channels = 1;
+
+    /// <summary>内存写入缓冲的最小大小（MB）。</summary>
+    public const double MinBufferSizeMb = 0.1;
+
+    /// <summary>内存写入缓冲的最大大小（MB）。</summary>
+    public const double MaxBufferSizeLimitMb = 1.0;
+
+    /// <summary>内存写入缓冲的默认大小（MB）。</summary>
+    public const double DefaultMaxBufferSizeMb = 0.2;
+
+    /// <summary>内存写入缓冲的最短时长（秒）。</summary>
+    public const int MinBufferDurationSeconds = 1;
+
+    /// <summary>内存写入缓冲的最长时长（秒）。</summary>
+    public const int MaxBufferDurationLimitSeconds = 60;
+
+    /// <summary>内存写入缓冲的默认时长（秒）。</summary>
+    public const int DefaultMaxBufferDurationSeconds = 10;
 
     [ObservableProperty]
     private List<Guid> _selectedSubjectIds = [];
@@ -63,38 +69,28 @@ public partial class RecorderSettings : ObservableObject
     private bool _keepMicrophoneOpen = true;
 
     [ObservableProperty]
-    private RecorderCodec _codec = RecorderCodec.Opus;
-
-    [ObservableProperty]
     private RecorderQuality _quality = RecorderQuality.Medium;
 
+    [ObservableProperty]
+    private double _maxBufferSizeMb = DefaultMaxBufferSizeMb;
+
+    [ObservableProperty]
+    private int _maxBufferDurationSeconds = DefaultMaxBufferDurationSeconds;
+
     /// <summary>
-    /// 获取指定编码与质量挡位的目标比特率（bps）。
+    /// 获取指定质量挡位的目标比特率（bps）。
     /// </summary>
-    public static int GetBitrate(RecorderCodec codec, RecorderQuality quality) => codec switch
+    public static int GetBitrate(RecorderQuality quality) => quality switch
     {
-        RecorderCodec.Opus => quality switch
-        {
-            RecorderQuality.High => 64_000,
-            RecorderQuality.Medium => 48_000,
-            _ => 24_000
-        },
-        RecorderCodec.Aac => quality switch
-        {
-            // Windows Media Foundation 的 AAC 编码器在 48 kHz 下仅支持 96/128/160/192 kbps。
-            RecorderQuality.High => 160_000,
-            RecorderQuality.Medium => 128_000,
-            _ => 96_000
-        },
-        _ => 48_000
+        RecorderQuality.High => 64_000,
+        RecorderQuality.Medium => 48_000,
+        _ => 24_000
     };
 
     /// <summary>
-    /// 获取指定编码对应的文件扩展名。
+    /// 录音文件扩展名。当前固定使用 Opus（Ogg 封装）。
     /// </summary>
-    public static string GetExtension(RecorderCodec codec) => codec == RecorderCodec.Opus ? "opus" : "m4a";
-
-    public static string GetCodecDisplayName(RecorderCodec codec) => codec == RecorderCodec.Opus ? "Opus" : "AAC";
+    public static string GetExtension() => "opus";
 
     public static string GetQualityDisplayName(RecorderQuality quality) => quality switch
     {
@@ -106,9 +102,9 @@ public partial class RecorderSettings : ObservableObject
     /// <summary>
     /// 按最大占用空间估算可录时长。可变比特率下按高出标称码率 15% 保守估算。
     /// </summary>
-    public TimeSpan EstimateCapacity(RecorderCodec codec, RecorderQuality quality)
+    public TimeSpan EstimateCapacity(RecorderQuality quality)
     {
-        var bitrate = GetBitrate(codec, quality) * 1.15;
+        var bitrate = GetBitrate(quality) * 1.15;
         var bytes = Math.Max(0, (long)MaxTotalSizeMb * 1024 * 1024);
         var seconds = bytes * 8 / bitrate;
         return TimeSpan.FromSeconds(seconds);
@@ -117,7 +113,7 @@ public partial class RecorderSettings : ObservableObject
     /// <summary>
     /// 按当前设置估算可录时长。
     /// </summary>
-    public TimeSpan EstimateCapacity() => EstimateCapacity(Codec, Quality);
+    public TimeSpan EstimateCapacity() => EstimateCapacity(Quality);
 
     /// <summary>
     /// 修正不符合约束的设置值。
@@ -131,6 +127,13 @@ public partial class RecorderSettings : ObservableObject
             AdvanceMinutes = 0;
         if (DelayMinutes < 0)
             DelayMinutes = 0;
+
+        if (!double.IsFinite(MaxBufferSizeMb))
+            MaxBufferSizeMb = DefaultMaxBufferSizeMb;
+        MaxBufferSizeMb = Math.Clamp(Math.Round(MaxBufferSizeMb, 1), MinBufferSizeMb, MaxBufferSizeLimitMb);
+
+        MaxBufferDurationSeconds = Math.Clamp(MaxBufferDurationSeconds,
+            MinBufferDurationSeconds, MaxBufferDurationLimitSeconds);
 
         if (string.IsNullOrWhiteSpace(AudioRoot))
             AudioRoot = DefaultAudioRoot;

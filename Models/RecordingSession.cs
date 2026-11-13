@@ -1,5 +1,3 @@
-using ClassIsland.ClassRecorderPlugin.Models;
-
 namespace ClassIsland.ClassRecorderPlugin.Models;
 
 /// <summary>
@@ -18,8 +16,8 @@ public class RecordingSession
     /// <summary>计划停止时间（含延后分钟数）。</summary>
     public DateTime PlannedStop { get; set; }
 
-    /// <summary>当前片段对应的 PCM 临时文件。</summary>
-    public string TempFilePath { get; set; } = "";
+    /// <summary>当前片段正在写入的最终录音文件。</summary>
+    public string OutputFilePath { get; set; } = "";
 
     /// <summary>是否处于恢复模式（片段写入 recovery 目录）。</summary>
     public bool RecoveryMode { get; set; }
@@ -27,11 +25,7 @@ public class RecordingSession
     /// <summary>当前片段编号，从 1 开始。</summary>
     public int SegmentIndex { get; set; } = 1;
 
-    public RecorderCodec Codec { get; set; } = RecorderCodec.Opus;
-
     public RecorderQuality Quality { get; set; } = RecorderQuality.Medium;
-
-    public RecordingSession Clone() => (RecordingSession)MemberwiseClone();
 }
 
 /// <summary>

@@ -159,20 +159,9 @@
                     BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
                 <StackPanel Spacing="8">
                     <TextBlock Text="编码与质量" FontSize="16" FontWeight="SemiBold" />
-                    <Grid ColumnDefinitions="Auto,200,Auto,200,*" ColumnSpacing="8">
-                        <TextBlock Grid.Column="0" Text="编码格式" VerticalAlignment="Center" />
+                    <Grid ColumnDefinitions="Auto,200,*" ColumnSpacing="8">
+                        <TextBlock Grid.Column="0" Text="质量预设" VerticalAlignment="Center" />
                         <ComboBox Grid.Column="1"
-                                  HorizontalAlignment="Stretch"
-                                  ItemsSource="{Binding CodecOptions}"
-                                  SelectedItem="{Binding SelectedCodec, Mode=TwoWay}">
-                            <ComboBox.ItemTemplate>
-                                <DataTemplate x:DataType="vm:CodecOption">
-                                    <TextBlock Text="{Binding Name}" />
-                                </DataTemplate>
-                            </ComboBox.ItemTemplate>
-                        </ComboBox>
-                        <TextBlock Grid.Column="2" Text="质量预设" VerticalAlignment="Center" />
-                        <ComboBox Grid.Column="3"
                                   HorizontalAlignment="Stretch"
                                   ItemsSource="{Binding QualityOptions}"
                                   SelectedItem="{Binding SelectedQuality, Mode=TwoWay}">
@@ -185,7 +174,31 @@
                     </Grid>
                     <TextBlock Text="{Binding EstimatedCapacityText}" Opacity="0.7" />
                     <TextBlock TextWrapping="Wrap" Opacity="0.6"
-                               Text="AAC 输出 .m4a（MPEG-4，兼容性最好）；Opus 输出 .opus（Ogg，体积更小、崩溃后更易恢复）。" />
+                               Text="录音以 Opus（Ogg，.opus）格式直接写入最终文件，体积更小、崩溃后更易恢复。" />
+                </StackPanel>
+            </Border>
+
+            <!-- 写入缓冲 -->
+            <Border Padding="16" CornerRadius="8" BorderThickness="1"
+                    Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
+                <StackPanel Spacing="8">
+                    <TextBlock Text="写入缓冲" FontSize="16" FontWeight="SemiBold" />
+                    <Grid ColumnDefinitions="Auto,160,Auto,160,Auto,*" ColumnSpacing="8">
+                        <TextBlock Grid.Column="0" Text="最大缓冲区大小" VerticalAlignment="Center" />
+                        <NumericUpDown Grid.Column="1"
+                                       Value="{Binding MaxBufferSizeMb, Mode=TwoWay}"
+                                       Minimum="0.1" Maximum="1" Increment="0.1"
+                                       FormatString="0.0" />
+                        <TextBlock Grid.Column="2" Text="MB，最大缓冲时长" VerticalAlignment="Center" />
+                        <NumericUpDown Grid.Column="3"
+                                       Value="{Binding MaxBufferDurationSeconds, Mode=TwoWay}"
+                                       Minimum="1" Maximum="60" Increment="1"
+                                       FormatString="0" />
+                        <TextBlock Grid.Column="4" Text="秒" VerticalAlignment="Center" />
+                    </Grid>
+                    <TextBlock TextWrapping="Wrap" Opacity="0.7"
+                               Text="编码后的音频先保存在内存中，达到任一上限后写入磁盘。意外退出时最多丢失这段缓冲的数据。" />
                 </StackPanel>
             </Border>
 

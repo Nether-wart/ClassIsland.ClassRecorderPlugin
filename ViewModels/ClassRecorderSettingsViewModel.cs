@@ -8,8 +8,6 @@ using CommunityToolkit.Mvvm.Input;
 
 namespace ClassIsland.ClassRecorderPlugin.ViewModels;
 
-public sealed record CodecOption(RecorderCodec Codec, string Name);
-
 public sealed record QualityOption(RecorderQuality Quality, string Name);
 
 public sealed record MicrophoneOption(string? Id, string Name)
@@ -83,12 +81,6 @@ public partial class ClassRecorderSettingsViewModel : ObservableObject, IDisposa
     public ObservableCollection<SubjectSelectionItem> Subjects { get; } = [];
 
     public ObservableCollection<MicrophoneOption> Microphones { get; } = [];
-
-    public IReadOnlyList<CodecOption> CodecOptions { get; } =
-    [
-        new(RecorderCodec.Opus, "Opus（推荐）"),
-        new(RecorderCodec.Aac, "AAC")
-    ];
 
     public IReadOnlyList<QualityOption> QualityOptions { get; } =
     [
@@ -197,15 +189,33 @@ public partial class ClassRecorderSettingsViewModel : ObservableObject, IDisposa
         }
     }
 
-    public CodecOption SelectedCodec
+    public decimal MaxBufferSizeMb
     {
-        get => CodecOptions.First(x => x.Codec == Settings.Codec);
+        get => (decimal)Settings.MaxBufferSizeMb;
         set
         {
-            if (value == null || Settings.Codec == value.Codec)
+            var v = Math.Clamp(Math.Round((double)value, 1),
+                RecorderSettings.MinBufferSizeMb, RecorderSettings.MaxBufferSizeLimitMb);
+            if (Math.Abs(Settings.MaxBufferSizeMb - v) < 0.0001)
                 return;
 
-            Settings.Codec = value.Codec;
+            Settings.MaxBufferSizeMb = v;
+            OnPropertyChanged();
+        }
+    }
+
+    public decimal MaxBufferDurationSeconds
+    {
+        get => Settings.MaxBufferDurationSeconds;
+        set
+        {
+            var v = Math.Clamp((int)value,
+                RecorderSettings.MinBufferDurationSeconds,
+                RecorderSettings.MaxBufferDurationLimitSeconds);
+            if (Settings.MaxBufferDurationSeconds == v)
+                return;
+
+            Settings.MaxBufferDurationSeconds = v;
             OnPropertyChanged();
         }
     }
@@ -246,7 +256,7 @@ public partial class ClassRecorderSettingsViewModel : ObservableObject, IDisposa
         get
         {
             var capacity = Settings.EstimateCapacity();
-            var bitrate = RecorderSettings.GetBitrate(Settings.Codec, Settings.Quality) / 1000;
+            var bitrate = RecorderSettings.GetBitrate(Settings.Quality) / 1000;
             var text = $"约 {FormatDuration(capacity)}（{bitrate} kbps）";
 
             var lessonMinutes = GetLessonMinutes();
@@ -466,13 +476,15 @@ public partial class ClassRecorderSettingsViewModel : ObservableObject, IDisposa
     {
         switch (e.PropertyName)
         {
-            case nameof(RecorderSettings.Codec):
-                OnPropertyChanged(nameof(SelectedCodec));
-                OnPropertyChanged(nameof(EstimatedCapacityText));
-                break;
             case nameof(RecorderSettings.Quality):
                 OnPropertyChanged(nameof(SelectedQuality));
                 OnPropertyChanged(nameof(EstimatedCapacityText));
+                break;
+            case nameof(RecorderSettings.MaxBufferSizeMb):
+                OnPropertyChanged(nameof(MaxBufferSizeMb));
+                break;
+            case nameof(RecorderSettings.MaxBufferDurationSeconds):
+                OnPropertyChanged(nameof(MaxBufferDurationSeconds));
                 break;
             case nameof(RecorderSettings.MaxTotalSizeMb):
                 OnPropertyChanged(nameof(MaxTotalSizeMb));

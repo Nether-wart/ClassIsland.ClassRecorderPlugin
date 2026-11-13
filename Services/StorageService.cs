@@ -7,6 +7,7 @@ namespace ClassIsland.ClassRecorderPlugin.Services;
 /// </summary>
 public class StorageService
 {
+    // 兼容旧版本生成的 .m4a/.wav 录音；新版本只会产生 .opus。
     private static readonly string[] RecordingExtensions = [".m4a", ".opus", ".wav"];
 
     public long GetTotalSize(string root)

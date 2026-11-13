@@ -44,9 +44,6 @@ public class RecorderSettingsService
 
     public RecorderSettings Settings { get; }
 
-    /// <summary>录音临时目录（PCM 片段）。</summary>
-    public string TempFolder => Path.Combine(ConfigFolder, "Temp");
-
     private RecorderSettings Load()
     {
         try

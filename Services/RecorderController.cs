@@ -23,13 +23,10 @@ public enum RecorderState
 }
 
 /// <summary>
-/// 上课录音的核心：按课表计算录音窗口，驱动麦克风采集、转码、滚动存储与意外恢复。
+/// 上课录音的核心：按课表计算录音窗口，驱动麦克风采集、实时编码、滚动存储与意外恢复。
 /// </summary>
 public class RecorderController : IDisposable
 {
-    /// <summary>PCM 临时文件刷盘间隔。决定了意外退出时最多丢失的音频长度。</summary>
-    private const int FlushIntervalSeconds = 10;
-
     /// <summary>开始录制前提示的提前秒数。</summary>
     private const int PromptLeadSeconds = 5;
 
@@ -45,8 +42,7 @@ public class RecorderController : IDisposable
     private readonly object _gate = new();
     private Timer? _timer;
     private RecordingSession? _session;
-    private PcmRecorder? _pcm;
-    private DateTime _lastFlush = DateTime.MinValue;
+    private OpusRecordingStream? _liveRecorder;
     private DateTime _nextMicrophoneRetry = DateTime.MinValue;
     private string? _lastPromptKey;
     private RecordingSession? _pendingResume;
@@ -55,8 +51,8 @@ public class RecorderController : IDisposable
     private RecorderState _state = RecorderState.Idle;
     private string _statusMessage = "待机";
 
-    private PcmRecorder? _testPcm;
-    private string _testTempPath = "";
+    private OpusRecordingStream? _testRecorder;
+    private string _testOutputPath = "";
     private DateTime _testStopAt = DateTime.MinValue;
     private int _audioLevelPermille;
 
@@ -92,7 +88,7 @@ public class RecorderController : IDisposable
     public bool IsRecording => _session != null;
 
     /// <summary>当前是否正在试录。</summary>
-    public bool IsTestRecording => _testPcm != null;
+    public bool IsTestRecording => _testRecorder != null;
 
     /// <summary>当前麦克风输入电平（0~1），用于界面电平条。</summary>
     public double AudioLevel => Volatile.Read(ref _audioLevelPermille) / 1000.0;
@@ -113,7 +109,6 @@ public class RecorderController : IDisposable
         _microphone.DevicesChanged += (_, _) => RaiseStateChanged();
 
         _microphone.RefreshDevices();
-        CleanupOrphanTempFiles();
         RecoverPendingSessions();
         Purge();
 
@@ -121,7 +116,7 @@ public class RecorderController : IDisposable
     }
 
     /// <summary>
-    /// 应用退出时调用。若正在录制，则保留临时文件与会话状态，下次启动走恢复流程。
+    /// 应用退出时调用。若正在录制，则把当前片段正常收尾并保留会话状态，下次启动走恢复流程。
     /// </summary>
     public void Shutdown()
     {
@@ -130,26 +125,34 @@ public class RecorderController : IDisposable
             _timer?.Dispose();
             _timer = null;
 
-            var pcm = _pcm;
-            _pcm = null;
-            pcm?.Flush();
-            pcm?.Dispose();
             _microphone.SampleSink = null;
 
-            // 试录属于临时验证，退出时直接丢弃，不进入恢复流程。
-            var testPcm = _testPcm;
-            _testPcm = null;
-            testPcm?.Flush();
-            testPcm?.Dispose();
-            if (!string.IsNullOrEmpty(_testTempPath))
+            var recorder = _liveRecorder;
+            _liveRecorder = null;
+            try
             {
-                TryDelete(_testTempPath);
-                _testTempPath = "";
+                recorder?.Finish();
             }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "退出时结束录音片段失败。");
+            }
+
+            var testRecorder = _testRecorder;
+            _testRecorder = null;
+            try
+            {
+                testRecorder?.Finish();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "退出时结束试录失败。");
+            }
+            _testOutputPath = "";
 
             if (_session != null)
             {
-                _logger.LogWarning("应用在录制过程中退出，已保留临时录音，下次启动将转入 recovery 目录并继续录制。");
+                _logger.LogWarning("应用在录制过程中退出，已保留当前录音，下次启动将转入 recovery 目录并继续录制。");
                 _store.Update(_session);
                 _session = null;
             }
@@ -197,7 +200,7 @@ public class RecorderController : IDisposable
             MaybePrompt(windows, now, settings);
 
             // 试录到点结束。
-            if (_testPcm != null && now >= _testStopAt)
+            if (_testRecorder != null && now >= _testStopAt)
             {
                 FinishTestRecording();
             }
@@ -221,7 +224,7 @@ public class RecorderController : IDisposable
                     var resume = _pendingResume;
                     _pendingResume = null;
                     _session = resume;
-                    if (BeginSegment(resume, now))
+                    if (BeginSegment(resume))
                     {
                         SetState(RecorderState.Recording, $"正在录制（恢复）：{resume.SubjectName}");
                     }
@@ -246,18 +249,18 @@ public class RecorderController : IDisposable
                 {
                     FinishSession();
                 }
-                else if (_pcm == null && _microphone.IsCapturing)
+                else if (_liveRecorder == null && _microphone.IsCapturing)
                 {
                     // 麦克风恢复后继续写入新片段。
-                    BeginSegment(_session, now);
+                    BeginSegment(_session);
                 }
             }
 
-            if (_session == null && current != null && _pendingResume == null && _testPcm == null)
+            if (_session == null && current != null && _pendingResume == null && _testRecorder == null)
             {
                 var session = CreateSession(current, settings);
                 _session = session;
-                if (BeginSegment(session, now))
+                if (BeginSegment(session))
                 {
                     SetState(RecorderState.Recording, $"正在录制：{session.SubjectName}");
                     _logger.LogInformation("开始录制「{Subject}」，计划结束时间 {Stop:HH:mm:ss}。",
@@ -269,11 +272,10 @@ public class RecorderController : IDisposable
                 }
             }
 
-            if (_pcm != null && (now - _lastFlush).TotalSeconds >= FlushIntervalSeconds)
-            {
-                _pcm.Flush();
-                _lastFlush = now;
-            }
+            _liveRecorder?.UpdateLimits(settings.MaxBufferSizeMb, settings.MaxBufferDurationSeconds);
+            _liveRecorder?.FlushIfNeeded();
+            _testRecorder?.UpdateLimits(settings.MaxBufferSizeMb, settings.MaxBufferDurationSeconds);
+            _testRecorder?.FlushIfNeeded();
         }
     }
 
@@ -360,36 +362,40 @@ public class RecorderController : IDisposable
         PlannedStop = window.Stop,
         RecoveryMode = window.RecoveryMode,
         SegmentIndex = window.SegmentIndex,
-        Codec = settings.Codec,
         Quality = settings.Quality
     };
 
-    private bool BeginSegment(RecordingSession session, DateTime now)
+    private bool BeginSegment(RecordingSession session)
     {
         if (!_microphone.IsCapturing)
             return false;
 
-        var tempPath = Path.Combine(_settingsService.TempFolder,
-            $"{DateTime.Now:yyyyMMdd-HHmmss}-{session.Id:N}.wav");
+        var settings = _settingsService.Settings;
+        var outputPath = BuildOutputPath(session);
 
         try
         {
-            _pcm?.Dispose();
-            _pcm = new PcmRecorder(tempPath, CaptureSampleRate, _microphone.CaptureChannels);
+            _liveRecorder?.Dispose();
+            _liveRecorder = new OpusRecordingStream(outputPath,
+                CaptureSampleRate,
+                RecorderSettings.GetBitrate(session.Quality),
+                settings.MaxBufferSizeMb,
+                settings.MaxBufferDurationSeconds,
+                _logger);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "创建临时录音文件失败：{Path}", tempPath);
-            SetState(RecorderState.Unavailable, "无法创建临时录音文件");
+            _logger.LogError(ex, "创建录音文件失败：{Path}", outputPath);
+            TryDelete(outputPath);
+            SetState(RecorderState.Unavailable, "无法创建录音文件");
             return false;
         }
 
-        session.TempFilePath = tempPath;
-        _lastFlush = now;
+        session.OutputFilePath = outputPath;
         _microphone.SampleSink = OnSamples;
         _store.Update(session);
 
-        _logger.LogInformation("开始写入录音片段 #{Segment}：{Path}", session.SegmentIndex, tempPath);
+        _logger.LogInformation("开始写入录音片段 #{Segment}：{Path}", session.SegmentIndex, outputPath);
         return true;
     }
 
@@ -408,8 +414,8 @@ public class RecorderController : IDisposable
 
         try
         {
-            _pcm?.Write(samples, count);
-            _testPcm?.Write(samples, count);
+            _liveRecorder?.Write(samples, count);
+            _testRecorder?.Write(samples, count);
         }
         catch (Exception ex)
         {
@@ -425,16 +431,43 @@ public class RecorderController : IDisposable
 
         _session = null;
 
-        var pcm = _pcm;
-        _pcm = null;
-        pcm?.Flush();
-        pcm?.Dispose();
+        var recorder = _liveRecorder;
+        _liveRecorder = null;
+
+        var saved = false;
+        var duration = TimeSpan.Zero;
+        if (recorder != null)
+        {
+            duration = recorder.Duration;
+            try
+            {
+                recorder.Finish();
+                saved = true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "结束录音片段失败：{Path}", session.OutputFilePath);
+            }
+        }
 
         _store.Remove(session);
-        SetState(RecorderState.Idle, "正在保存录音…");
 
-        var tempPath = session.TempFilePath;
-        _ = Task.Run(() => EncodeAndStore(session, tempPath));
+        if (saved && duration < TimeSpan.FromSeconds(0.5))
+        {
+            TryDelete(session.OutputFilePath);
+            SetState(RecorderState.Idle, "录音时间过短，已丢弃");
+        }
+        else if (saved)
+        {
+            SetState(RecorderState.Idle, $"已保存：{Path.GetFileName(session.OutputFilePath)}");
+            _logger.LogInformation("录音已保存：{Path}", session.OutputFilePath);
+        }
+        else
+        {
+            SetState(RecorderState.Idle, "录音结束，但收尾写入失败");
+        }
+
+        _ = Task.Run(Purge);
     }
 
     #region 试录
@@ -454,7 +487,7 @@ public class RecorderController : IDisposable
                 return false;
             }
 
-            if (_testPcm != null)
+            if (_testRecorder != null)
             {
                 error = "试录正在进行中。";
                 return false;
@@ -473,20 +506,30 @@ public class RecorderController : IDisposable
                 return false;
             }
 
+            var settings = _settingsService.Settings;
             var now = _timeService.GetCurrentLocalDateTime();
-            _testTempPath = Path.Combine(_settingsService.TempFolder, $"test-{DateTime.Now:yyyyMMdd-HHmmss}.wav");
+            var folder = Path.Combine(GetAudioRoot(), "test");
+            var outputPath = EnsureUnique(Path.Combine(folder,
+                $"试录-{DateTime.Now:yyyyMMdd-HHmmss}.{RecorderSettings.GetExtension()}"));
 
             try
             {
-                _testPcm = new PcmRecorder(_testTempPath, CaptureSampleRate, _microphone.CaptureChannels);
+                _testRecorder = new OpusRecordingStream(outputPath,
+                    CaptureSampleRate,
+                    RecorderSettings.GetBitrate(settings.Quality),
+                    settings.MaxBufferSizeMb,
+                    settings.MaxBufferDurationSeconds,
+                    _logger);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "创建试录临时文件失败。");
-                error = "无法创建临时录音文件。";
+                _logger.LogError(ex, "创建试录文件失败：{Path}", outputPath);
+                TryDelete(outputPath);
+                error = "无法创建试录文件。";
                 return false;
             }
 
+            _testOutputPath = outputPath;
             _testStopAt = now.Add(duration);
             _microphone.SampleSink = OnSamples;
             SetState(RecorderState.Recording, "正在试录…");
@@ -497,62 +540,35 @@ public class RecorderController : IDisposable
 
     private void FinishTestRecording()
     {
-        var pcm = _testPcm;
-        if (pcm == null)
+        var recorder = _testRecorder;
+        if (recorder == null)
             return;
 
-        _testPcm = null;
-        var tempPath = _testTempPath;
-        _testTempPath = "";
+        _testRecorder = null;
+        var outputPath = _testOutputPath;
+        _testOutputPath = "";
 
-        pcm.Flush();
-        pcm.Dispose();
-
-        SetState(RecorderState.Idle, "试录完成，正在保存…");
-        _ = Task.Run(() => EncodeTestRecording(tempPath));
-    }
-
-    private void EncodeTestRecording(string tempPath)
-    {
         try
         {
-            if (!File.Exists(tempPath))
-                return;
-
-            var dataBytes = WavFileHelper.FixHeader(tempPath, _logger);
-            if (dataBytes < RecorderSettings.SampleRate)
-            {
-                TryDelete(tempPath);
-                SetState(RecorderState.Idle, "试录时间过短，已丢弃");
-                return;
-            }
-
-            var settings = _settingsService.Settings;
-            var session = new RecordingSession
-            {
-                SubjectName = "试录",
-                LessonStart = DateTime.Now,
-                Codec = settings.Codec,
-                Quality = settings.Quality
-            };
-
-            var folder = Path.Combine(GetAudioRoot(), "test");
-            Directory.CreateDirectory(folder);
-            var extension = RecorderSettings.GetExtension(session.Codec);
-            var outputPath = EnsureUnique(Path.Combine(folder, $"试录-{DateTime.Now:yyyyMMdd-HHmmss}.{extension}"));
-
-            AudioEncoder.Encode(session, tempPath, outputPath, _logger);
-            TryDelete(tempPath);
-
-            SetState(RecorderState.Idle, $"试录已保存：{outputPath}");
-            _logger.LogInformation("试录已保存：{Path}", outputPath);
-            Purge();
+            recorder.Finish();
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "保存试录失败。");
+            _logger.LogError(ex, "保存试录失败：{Path}", outputPath);
             SetState(RecorderState.Idle, "试录保存失败");
+            return;
         }
+
+        if (recorder.Duration < TimeSpan.FromSeconds(0.5))
+        {
+            TryDelete(outputPath);
+            SetState(RecorderState.Idle, "试录时间过短，已丢弃");
+            return;
+        }
+
+        SetState(RecorderState.Idle, $"试录已保存：{outputPath}");
+        _logger.LogInformation("试录已保存：{Path}", outputPath);
+        _ = Task.Run(Purge);
     }
 
     /// <summary>
@@ -566,60 +582,47 @@ public class RecorderController : IDisposable
 
     #endregion
 
-    private void EncodeAndStore(RecordingSession session, string tempPath)
+    /// <summary>
+    /// 把被中断的录音片段移动到 recovery 目录，避免和正常录音混在一起。
+    /// </summary>
+    private void MoveSegmentToRecovery(RecordingSession session, string path)
     {
         try
         {
-            if (!File.Exists(tempPath))
+            if (string.IsNullOrEmpty(path) || !File.Exists(path))
                 return;
 
-            var dataBytes = WavFileHelper.FixHeader(tempPath, _logger);
-            var minimumBytes = RecorderSettings.SampleRate * 2 / 2; // 0.5 秒
-            if (dataBytes < minimumBytes)
+            var info = new FileInfo(path);
+            if (info.Length == 0)
             {
-                TryDelete(tempPath);
-                SetState(RecorderState.Idle, "录音时间过短，已丢弃");
+                info.Delete();
                 return;
             }
 
-            var outputPath = BuildOutputPath(session);
-            AudioEncoder.Encode(session, tempPath, outputPath, _logger);
-            TryDelete(tempPath);
-
-            SetState(RecorderState.Idle, $"已保存：{Path.GetFileName(outputPath)}");
-            _logger.LogInformation("录音已保存：{Path}", outputPath);
-
-            Purge();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "保存录音失败，尝试把原始录音转入 recovery 目录。");
-            TryMoveToRecovery(session, tempPath);
-            SetState(RecorderState.Idle, "录音保存失败，原始录音已转入 recovery 目录");
-        }
-    }
-
-    /// <summary>
-    /// 转码失败时，至少把 PCM 原始文件放进 recovery 目录，避免录音彻底丢失。
-    /// </summary>
-    private void TryMoveToRecovery(RecordingSession session, string tempPath)
-    {
-        try
-        {
-            if (!File.Exists(tempPath))
-                return;
-
-            WavFileHelper.FixHeader(tempPath, _logger);
             var folder = Path.Combine(GetAudioRoot(), "recovery");
             Directory.CreateDirectory(folder);
             var target = EnsureUnique(Path.Combine(folder,
-                $"{session.LessonStart:yyyy-MM-dd}-{Sanitize(session.SubjectName)}-{session.LessonStart:HH_mm}-{session.SegmentIndex:00}.wav"));
-            File.Move(tempPath, target, true);
-            _logger.LogWarning("原始录音已保存到 {Path}", target);
+                $"{session.LessonStart:yyyy-MM-dd}-{Sanitize(session.SubjectName)}-{session.LessonStart:HH_mm}-{session.SegmentIndex:00}.{RecorderSettings.GetExtension()}"));
+            File.Move(path, target, true);
+            _logger.LogWarning("中断的录音片段已保存到 {Path}", target);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "把原始录音转入 recovery 目录失败，临时文件保留在 {Path}", tempPath);
+            _logger.LogError(ex, "把中断的录音片段转入 recovery 目录失败，文件保留在 {Path}", path);
+        }
+    }
+
+    private bool IsInRecoveryFolder(string path)
+    {
+        try
+        {
+            var folder = Path.GetFullPath(Path.Combine(GetAudioRoot(), "recovery"));
+            var full = Path.GetFullPath(path);
+            return full.StartsWith(folder + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
         }
     }
 
@@ -636,24 +639,30 @@ public class RecorderController : IDisposable
                 return;
             }
 
-            // 不完整的片段按意外恢复规则写入 recovery 目录，麦克风恢复后继续录制。
-            var snapshot = _session.Clone();
-            snapshot.RecoveryMode = true;
-            var tempPath = _session.TempFilePath;
-
+            // 当前片段按意外恢复规则保存到 recovery 目录，麦克风恢复后继续录制。
             _microphone.SampleSink = null;
-            var pcm = _pcm;
-            _pcm = null;
-            pcm?.Flush();
-            pcm?.Dispose();
+            var recorder = _liveRecorder;
+            _liveRecorder = null;
+            var path = _session.OutputFilePath;
+
+            try
+            {
+                recorder?.Finish();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "结束中断的录音片段失败：{Path}", path);
+            }
+
+            if (!string.IsNullOrEmpty(path) && !IsInRecoveryFolder(path))
+                MoveSegmentToRecovery(_session, path);
 
             _session.RecoveryMode = true;
             _session.SegmentIndex = Math.Max(1, _session.SegmentIndex) + 1;
-            _session.TempFilePath = "";
+            _session.OutputFilePath = "";
             _store.Update(_session);
 
             SetState(RecorderState.Unavailable, "麦克风已断开，稍后重试…");
-            _ = Task.Run(() => EncodeAndStore(snapshot, tempPath));
         }
     }
 
@@ -667,20 +676,20 @@ public class RecorderController : IDisposable
         foreach (var stored in _store.Sessions.ToList())
         {
             var session = stored;
-            session.RecoveryMode = true;
+            var path = session.OutputFilePath;
 
-            if (File.Exists(session.TempFilePath))
+            if (!string.IsNullOrEmpty(path) && File.Exists(path) && !IsInRecoveryFolder(path))
             {
-                var snapshot = session.Clone();
-                var tempPath = session.TempFilePath;
                 _logger.LogWarning("发现未完成的录音片段「{Subject}」，正在转入 recovery 目录。", session.SubjectName);
-                _ = Task.Run(() => EncodeAndStore(snapshot, tempPath));
+                MoveSegmentToRecovery(session, path);
             }
+
+            session.RecoveryMode = true;
 
             if (now < session.PlannedStop)
             {
                 session.SegmentIndex = Math.Max(1, session.SegmentIndex) + 1;
-                session.TempFilePath = "";
+                session.OutputFilePath = "";
                 _store.Update(session);
                 _pendingResume = session;
                 _logger.LogWarning("「{Subject}」的录音尚未到结束时间，将在启动后继续录制。", session.SubjectName);
@@ -689,31 +698,6 @@ public class RecorderController : IDisposable
             {
                 _store.Remove(session);
             }
-        }
-    }
-
-    private void CleanupOrphanTempFiles()
-    {
-        try
-        {
-            if (!Directory.Exists(_settingsService.TempFolder))
-                return;
-
-            var referenced = _store.Sessions.Select(x => x.TempFilePath).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            foreach (var file in Directory.EnumerateFiles(_settingsService.TempFolder, "*.wav"))
-            {
-                if (referenced.Contains(file))
-                    continue;
-
-                if (DateTime.Now - File.GetLastWriteTime(file) < TimeSpan.FromHours(1))
-                    continue;
-
-                TryDelete(file);
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "清理临时录音文件失败。");
         }
     }
 
@@ -852,7 +836,7 @@ public class RecorderController : IDisposable
     private string BuildOutputPath(RecordingSession session)
     {
         var root = GetAudioRoot();
-        var extension = RecorderSettings.GetExtension(session.Codec);
+        var extension = RecorderSettings.GetExtension();
         var subject = Sanitize(session.SubjectName);
 
         string path;
