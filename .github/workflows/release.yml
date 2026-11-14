@@ -1,0 +1,106 @@
+name: Release
+
+# 推送形如 1.0.0.0 的 Tag 时自动构建并发布插件包。
+# 发布前请确保：
+#   1. 提交已经在 main 分支上；
+#   2. manifest.yml 的 version 与 Tag 完全一致；
+#   3. 构建生成的 cipx/checksums.md 会被写入 Release 正文（插件市场索引生成器从这里读取 MD5）。
+
+on:
+  push:
+    tags:
+      - '*.*.*.*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: 构建并发布 ${{ github.ref_name }}
+    runs-on: windows-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 校验 Tag 与清单版本
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          if ($tag -notmatch '^\d+\.\d+\.\d+\.\d+$') {
+            throw "Tag '$tag' 不符合 a.b.c.d 格式，无法发布。"
+          }
+
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main' 2>$null
+          git rev-parse --verify origin/main *> $null
+          if ($LASTEXITCODE -ne 0) {
+            throw "无法解析 origin/main 分支，已跳过发布。"
+          }
+
+          git merge-base --is-ancestor $env:GITHUB_SHA origin/main
+          if ($LASTEXITCODE -ne 0) {
+            throw "Tag '$tag' 指向的提交不在 main 分支上，已跳过发布。"
+          }
+
+          $match = Select-String -Path manifest.yml -Pattern '^version:\s*(\S+)\s*$'
+          if (-not $match) {
+            throw "manifest.yml 中未找到 version 字段。"
+          }
+
+          $version = $match.Matches[0].Groups[1].Value
+          if ($version -ne $tag) {
+            throw "manifest.yml 的 version（$version）与 Tag（$tag）不一致，请先更新清单并提交后再打 Tag。"
+          }
+
+      - name: 安装 .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: 构建插件包
+        run: dotnet build ClassIsland.ClassRecorderPlugin.csproj -c Release
+
+      - name: 生成发布说明
+        shell: pwsh
+        run: |
+          $checksums = (Get-Content cipx/checksums.md -Raw).Trim()
+          if ($checksums -notmatch 'CLASSISLAND_PKG_MD5') {
+            throw "cipx/checksums.md 中没有 MD5 校验信息。"
+          }
+
+          # Release 正文需要包含 CLASSISLAND_PKG_MD5 注释，插件市场索引生成器从这里读取校验和。
+          $body = "上课录制插件 $env:GITHUB_REF_NAME`n`n$checksums`n"
+          Set-Content -Path release-body.md -Value $body -Encoding utf8
+          if ($env:GITHUB_STEP_SUMMARY) {
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## $env:GITHUB_REF_NAME`n`n$checksums"
+          }
+
+      - name: 创建 Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $package = Get-ChildItem cipx/*.cipx | Select-Object -First 1
+          if (-not $package) {
+            throw "未找到构建生成的 .cipx 插件包。"
+          }
+
+          # 如果之前已经建过该 Tag 的 Release（例如重跑失败的任务），则覆盖资产与正文，保证幂等。
+          # 重新构建后 MD5 会变化，正文必须一起更新，否则插件市场校验会失败。
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $package.FullName --clobber
+            gh release edit $tag --notes-file release-body.md
+          }
+          else {
+            gh release create $tag $package.FullName `
+              --title "上课录制 $tag" `
+              --notes-file release-body.md
+          }
