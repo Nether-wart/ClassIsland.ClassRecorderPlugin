@@ -61,7 +61,8 @@ public sealed class OpusRecordingStream : IDisposable
                 encoder.Bitrate = bitrate;
                 encoder.Complexity = 10;
                 encoder.UseVBR = true;
-                encoder.UseInbandFEC = true;
+                // 文件录制没有丢包，FEC 冗余帧只会挤占音频码率，因此关闭。
+                encoder.UseInbandFEC = false;
 
                 _file = file;
                 _buffer = buffer;
@@ -128,7 +129,7 @@ public sealed class OpusRecordingStream : IDisposable
 
             _maxBufferSizeMb = ClampBufferSize(maxBufferSizeMb);
             _maxBufferDurationSeconds = ClampBufferDuration(maxBufferDurationSeconds);
-            _buffer.MaxBytes = ToBytes(_maxBufferSizeMb);
+            _buffer.SetMaxBytes(ToBytes(_maxBufferSizeMb));
 
             if (UnflushedDuration >= TimeSpan.FromSeconds(_maxBufferDurationSeconds) ||
                 _buffer.BufferedBytes >= _buffer.MaxBytes)
@@ -211,16 +212,31 @@ public sealed class OpusRecordingStream : IDisposable
     /// </summary>
     private sealed class BufferedWriteStream : Stream
     {
+        /// <summary>预分配上限，避免异常设置值一次占用过多内存。</summary>
+        private const long MaxPreallocatedBytes = 16 * 1024 * 1024;
+
         private readonly Stream _inner;
-        private readonly MemoryStream _buffer = new();
+        private readonly MemoryStream _buffer;
 
         public BufferedWriteStream(Stream inner, long maxBytes)
         {
             _inner = inner;
             MaxBytes = maxBytes;
+            // 一次性预分配到上限：写入过程中不扩容，落盘后复用同一块内存。
+            _buffer = new MemoryStream(CapacityFor(maxBytes));
         }
 
-        public long MaxBytes { get; set; }
+        public long MaxBytes { get; private set; }
+
+        /// <summary>更新缓冲上限；上限变大时按新上限重新预分配。</summary>
+        public void SetMaxBytes(long maxBytes)
+        {
+            MaxBytes = maxBytes;
+
+            var capacity = CapacityFor(maxBytes);
+            if (_buffer.Capacity < capacity)
+                _buffer.Capacity = capacity;
+        }
 
         public long BufferedBytes => _buffer.Length;
 
@@ -269,6 +285,9 @@ public sealed class OpusRecordingStream : IDisposable
         public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
 
         public override void SetLength(long value) => throw new NotSupportedException();
+
+        private static int CapacityFor(long maxBytes) =>
+            (int)Math.Clamp(maxBytes, 1, MaxPreallocatedBytes);
 
         protected override void Dispose(bool disposing)
         {

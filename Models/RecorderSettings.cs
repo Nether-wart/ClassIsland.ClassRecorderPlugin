@@ -83,7 +83,7 @@ public partial class RecorderSettings : ObservableObject
     public static int GetBitrate(RecorderQuality quality) => quality switch
     {
         RecorderQuality.High => 64_000,
-        RecorderQuality.Medium => 48_000,
+        RecorderQuality.Medium => 32_000,
         _ => 24_000
     };
 
